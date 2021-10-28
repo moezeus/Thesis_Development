@@ -1,0 +1,8 @@
+<launch>
+
+	<arg name="control_config_file" default="$(find thesis)/config/params_control.yaml"/>
+	<node pkg="thesis" type="state_estimator.py" name="estimator_node" output="screen">
+		<rosparam file="$(arg control_config_file)" command="load"/>
+	</node>
+	
+</launch>
