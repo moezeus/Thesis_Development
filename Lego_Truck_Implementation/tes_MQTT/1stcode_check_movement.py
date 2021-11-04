@@ -1,8 +1,8 @@
-#=========Obstacle Avoidance of Autonomous Truck Trailer Script===========
-#Lab ICoDeS, Teknik Fisika, ITB, 2020
-#13316008 I Komang Agus Jony Wirawan
-#13316028 Indah Radityo Putri
+#=========Movement Manual Check Autonomous Truck Trailer Script========
+#Lab ICoDeS, Teknik Fisika, ITB
+#Husnul Amri
 #======================================================================
+
 from ev3dev.ev3 import *
 from time import sleep
 
