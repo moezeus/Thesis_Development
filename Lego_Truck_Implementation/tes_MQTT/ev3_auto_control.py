@@ -25,7 +25,7 @@ m.position = 0
 # MQTT Part
 speed = 0
 steer = 0
-broker = "192.168.1.100"
+broker = "192.168.1.101"
 port = 1883
 topic = "/EV3_movement/#"
 
@@ -43,12 +43,12 @@ def connect_mqtt() -> mqtt:
     client.connect(broker, port)
     return client
 
-# def speed_action(client, userdata, message):
-#     speed = message.payload.decode("utf-8")
-#     speed = int(speed)
-#     print("speed :" + str(speed))
-#     mr.run_forever(speed_sp = int(-speed))
-#     ml.run_forever(speed_sp = int(-speed))
+def speed_action(client, userdata, message):
+    speed = message.payload.decode("utf-8")
+    speed = int(speed)
+    # print("speed :" + str(speed))
+    mr.run_forever(speed_sp = int(-speed))
+    ml.run_forever(speed_sp = int(-speed))
 
 
 def steer_action(client, userdata, message):
@@ -56,9 +56,9 @@ def steer_action(client, userdata, message):
     steer = int(steer)
     print("steer :" + str(steer))
     if steer > 0: #turn left
-        m.run_forever(speed_sp=int(50))
+        m.run_forever(speed_sp=int(30))
     elif steer < 0: #turn right
-        m.run_forever(speed_sp=int(-50))
+        m.run_forever(speed_sp=int(-30))
     elif steer == 0: #maintain
         m.run_forever(speed_sp=int(0))
 
@@ -69,7 +69,7 @@ def steer_action(client, userdata, message):
 
 client = connect_mqtt()
 client.subscribe(topic)
-# client.message_callback_add("/EV3_movement/speed", speed_callback)
+client.message_callback_add("/EV3_movement/speed_actuate", speed_action)
 client.message_callback_add("/EV3_movement/steer_actuate", steer_action)
 
 client.loop_forever()

@@ -26,7 +26,7 @@ m.position = 0
 # MQTT Part
 speed = 0
 steer = 0
-broker ="192.168.1.100"
+broker ="192.168.1.101"
 port = 1883
 topic = "/EV3_movement/#"
 

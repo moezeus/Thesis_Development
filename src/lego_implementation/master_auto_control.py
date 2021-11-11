@@ -39,9 +39,12 @@ def connect_mqtt() -> mqtt:
     return client
 
 def speed_callback(client, userdata, message):
-    params.speed = message.payload.decode("utf-8")
-    params.speed = int(params.speed)
-    client.publish("/EV3_movement/speed_actuate",params.speed)
+    params.speed = float(message.payload.decode("utf-8"))
+    cs_long = int(1401.149 * params.speed + 22.2362)
+    if params.speed==0:
+        cs_long = 0
+    client.publish("/EV3_movement/speed_actuate",cs_long)
+    print("command_speed :"+str(cs_long))
 
 def steer_callback(client, userdata, message):
     params.steer = message.payload.decode("utf-8")
@@ -49,6 +52,13 @@ def steer_callback(client, userdata, message):
     # convert from degree to radian
     params.steer = params.steer * (np.pi/180)
     print("Steer Command:" + str(params.steer))
+
+def steer_rad_callback(client, userdata, message):
+    params.steer = message.payload.decode("utf-8")
+    params.steer = float(params.steer)
+    if np.isnan(params.steer):
+        params.steer = 0
+    print("Steer Command rad:" + str(params.steer))
 
 def steer_angle_callback(client, userdata, message):
     ADC = message.payload.decode("utf-8")
@@ -58,22 +68,21 @@ def steer_angle_callback(client, userdata, message):
     ADC_target = int(ADC_target)  
 
     if ADC >= (ADC_target-10) and ADC <= (ADC_target + 10): #tolerance, avoid jittering
-        cs_steer = 0
+        cs_lat = 0
     elif ADC > ADC_target: #perintah belok kanan
-        cs_steer = -1
+        cs_lat = -1
     elif ADC < ADC_target: #perintah belok kiri
-        cs_steer = 1
-    # else:   #maintain
-    #     cs_steer = 0
+        cs_lat = 1
 
-    print("ADC_now: "+str(ADC)+" ADC_target: "+str(ADC_target)+" command_steer: "+str(cs_steer))
-    client.publish("/EV3_movement/steer_actuate",cs_steer)
+    # print("ADC_now: "+str(ADC)+" ADC_target: "+str(ADC_target)+" command_steer: "+str(cs_lat))
+    client.publish("/EV3_movement/steer_actuate",cs_lat)
 
 
 params = get_params()
 client = connect_mqtt()
 client.subscribe(topic)
 client.message_callback_add("/EV3_movement/speed_command", speed_callback)
+client.message_callback_add("/EV3_movement/steer_command_rad", steer_rad_callback)
 client.message_callback_add("/EV3_movement/steer_command", steer_callback)
 client.message_callback_add("/EV3_movement/steer_angle_ADC", steer_angle_callback)
 client.loop_forever()

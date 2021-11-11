@@ -1,0 +1,392 @@
+# Game Theory Planning
+# Husnul Amri (2021)
+# github : @moezeus
+# adapted from RobustDecisionMaking (Gokul)
+
+# Obstacle only (1st scenario of implementation)
+
+from RobustDecisionMaking import get_params, env_sim, path_generation
+import numpy as np
+import time
+from thesis.msg import Autonomous_Game
+from thesis.msg import State_Estimator
+import rospy
+# import os
+
+#for used in master PC (with ROS)
+# using MQTT
+import paho.mqtt.client as mqtt
+import numpy as np
+
+# MQTT Stuff
+broker ="192.168.1.101"
+port = 1883
+topic = "/EV3_movement/#"
+
+# ROS thing
+rospy.init_node('controller')
+freq = 20 # Hz
+pub = rospy.Publisher('/game_theory_AV', Autonomous_Game, queue_size=1)
+rate = rospy.Rate(freq) # Hz
+pub_msg = Autonomous_Game()
+pub_msg.header.frame_id = 'agv_trajectory_control_' + "game_theory"
+pub_msg.header.seq = 0
+pub_msg.header.stamp = rospy.Time.now()
+
+dt_sim = 1/freq
+
+params = get_params.get_params()
+# game_decision = env_sim._calculate_game_theory_action_V0()
+# controller = Controller()
+
+# init vehicle position 
+# finish position stated on get_params
+X_AV = 2.68
+Y_AV = -0.72 
+yaw_AV = [3.14]
+yaw_pub = 0
+V_AV = [params.v_nominal]
+X_finish = params.final_x
+Y_finish = params.final_y
+cs_steer = 0
+omega = 0
+
+# other vehicles
+X_oth = 2.68
+Y_oth = -1.02 
+yaw_oth = 3.14
+V_oth = params.v_nom_others
+X_finish_oth = params.final_x
+Y_finish_oth = -1.02 
+others_case = 0 # 0 for cooperative, 1 for aggresive
+
+# set initial tracking and return flag
+tracking_flag = False
+return_flag = False
+
+iterate_waypoints = 0
+iterate_return = 0
+num_waypoints = 0
+num_return = 0
+sig_x = []
+sig_y = []
+V_ref_tr = []
+dt = []
+yaw_rate = []
+x_trans = X_AV
+y_trans = Y_AV
+traj_tracking = [[],[],[]]
+traj_return = [[],[],[]]
+time_base = 0
+time_now = 0
+
+other_L0 = 0
+other_L1 = 0
+
+print("Waiting.....")
+time.sleep(5) #mnunggu node untuk live plot
+print("Simulation Start!")
+# 1. coba dlu pake yang lama
+
+# function definition
+def connect_mqtt() -> mqtt:
+    def on_connect(client, userdata, flags, rc):
+        if rc == 0:
+            print("Connected to MQTT Broker!")
+        else:
+            print("Failed to connect, return code %d\n", rc)
+
+    client = mqtt.Client()
+    # client.username_pw_set(username, password)
+    client.on_connect = on_connect
+    client.connect(broker, port)
+    return client
+
+
+# to calculate steer control signal using Stanley Controller
+def calculate_stanley_control(X, Y, yaw, t_now, X_wp, Y_wp, dt_wp, v_wp, yaw_wp):
+    # check waypoint to follow based on time trajectory
+    T_tr_idx = (np.argmin(np.square(np.array(dt_wp)[0:]-t_now)))
+    if t_now > dt_wp[T_tr_idx]: 
+        T_tr_idx += 1
+    
+    dt = dt_wp[T_tr_idx] - t_now
+
+    V_AV = v_wp[T_tr_idx]
+
+    # delta (Use Stanley!)
+    if dt == 0 : 
+      cs_steer = 0
+    else: 
+      _e_yaw = yaw_wp[T_tr_idx] - yaw
+      _e_yaw = (_e_yaw + np.pi) % (2 * np.pi) - np.pi # Wrap the angle to [-pi, pi)
+      _dtrx = X_wp[T_tr_idx] - X_wp[T_tr_idx-1]
+      _dtry = Y_wp[T_tr_idx] - Y_wp[T_tr_idx-1]
+      c = _dtrx * Y_wp[T_tr_idx-1] -  _dtry * X_wp[T_tr_idx-1]
+      _e_lat = ((X*_dtry)+ c - (Y*_dtrx))/np.sqrt(_dtrx**2+_dtry**2) + 10**(-32)
+      cs_steer = _e_yaw + np.arctan(50*_e_lat / (1 + V_AV))
+      cs_steer = min(max(cs_steer, -0.33),0.33) #maximum 19 degree
+
+    omega = ((V_AV/(params.l_car*2))*np.tan(cs_steer))
+    if omega == 0:
+      pass
+    else : 
+      yaw = yaw + omega*dt_sim
+    
+    return V_AV, -cs_steer
+
+# to update the AV position
+def update_AV_position(X, Y, V, yaw, dt):
+    X_AV = X + V * np.cos(yaw) * dt
+    Y_AV = Y + V * np.sin(yaw) * dt
+    V_AV = V
+    yaw_pub = yaw
+    return X_AV, Y_AV, V_AV, yaw_pub
+
+# to update the other vehicle position
+def update_other_vehicle_position(X_AV, X_oth, Y_AV, Y_oth, V_AV, V_oth, dt):
+    dist_AV_others = np.sqrt((X_AV-X_oth)**2+(Y_AV-Y_oth)**2)
+    # print(dist_AV_others, V_oth, dt)
+    # dt = (V_AV*dt)/V_oth
+    if others_case:     #egoistic
+        # print("ego")
+        if X_oth>X_AV and Y_AV < -0.75 and Y_AV > -0.95: #AV try to overtaking
+            V_oth = params.v_max      #accelerate
+        else : 
+            if V_oth == params.v_max:     #keep the speed
+                V_oth = V_oth
+            else : 
+                V_oth = params.v_nom_others
+    else: #cooperative
+        # print("coop")
+        if X_oth>X_AV and dist_AV_others < 0.8 and Y_AV < -0.9 and Y_AV > -1.02: #AV try to overtaking
+            V_oth = params.v_nom_others*0.05       #deccelerate
+        else : 
+            V_oth = params.v_nom_others
+
+    X_oth = X_oth + V_oth * np.cos(yaw_oth) * dt
+    Y_oth = Y_oth
+    V_oth = V_oth
+    return X_oth, Y_oth, V_oth
+
+
+# update vehicle state block
+def veh_state_update(yaw_AV, V_AV, iteration): 
+    yaw_AV = yaw_AV[iteration]
+    # V_AV = params.v_nominal
+    V_AV = V_AV
+    x = [X_AV, X_oth]
+    y = [Y_AV, Y_oth]
+    yaw = [yaw_AV, yaw_oth]
+    v = [V_AV, V_oth]
+    AV_cars = [1,0]
+    final_x = [params.final_x, X_finish_oth]
+    final_y = [params.final_y, Y_finish_oth]
+    final_yaw = [params.final_yaw, params.final_yaw]
+    initial_state = np.block([x, y, yaw, v, AV_cars, final_x, final_y,final_yaw])
+
+    return initial_state
+
+
+# to calculate trajectory planning and game theory decision making
+def main_function(msg):
+
+    global X_AV, Y_AV, yaw_pub, V_AV
+
+    X_AV = msg.x_est
+    Y_AV = msg.y_est
+    yaw_pub = msg.yaw_est
+    V_AV = msg.v_est
+
+    # print("update")
+    # print(X_AV, Y_AV, V_AV, yaw_pub)
+
+client = connect_mqtt()
+client.loop_start()
+
+sub = rospy.Subscriber('/vehicle_state', State_Estimator, main_function)
+# rospy.spin()
+
+while X_AV > X_finish : 
+
+    # global tracking_flag, return_flag, iterate_waypoints, num_waypoints
+    # global V_ref_tr, X_oth, Y_oth, V_oth, dt, yaw_AV, x_tr, y_tr
+    # global traj_return, iterate_return, num_return, time_now
+    # global sig_x, sig_y, traj_tracking, cs_steer, time_base
+
+    if tracking_flag and not return_flag: 
+        if iterate_waypoints < num_waypoints-2: 
+            # game theory decision making
+            # update dt for decision 
+            iteration = iterate_waypoints
+            veh_state = veh_state_update(yaw_AV, V_AV, iterate_waypoints)
+            Action_AV, return_flag, other_L0, other_L1, return_sig, traj_return = env_sim._calculate_game_theory_action_V0(veh_state, sig_x, sig_y, iteration, traj_tracking)
+            time_now = time.time() - time_base                
+
+            if Action_AV == 0:  #maintain
+                # update AV position
+                # X_AV, Y_AV, V_AV, yaw_pub = update_AV_position(X_AV, Y_AV, V_ref_tr[iterate_waypoints], yaw_AV[iterate_waypoints], dt[iterate_waypoints])
+                # Calculate Stanley Lateral Control
+                V_AV, cs_steer = calculate_stanley_control(X_AV, Y_AV, yaw_pub, time_now, sig_x, sig_y, dt, V_ref_tr, yaw_AV)
+
+                # update other vehicle position
+                X_oth, Y_oth, V_oth = update_other_vehicle_position(X_AV, X_oth, Y_AV, Y_oth, V_AV, V_oth, params.t_step_Sim)
+                
+                if time_now >= dt[iterate_waypoints]: 
+                    iterate_waypoints += 1
+                else: 
+                    pass
+
+            elif Action_AV == 1: #decelerate
+                # update AV position
+                # X_AV, Y_AV, V_AV, yaw_pub = update_AV_position(X_AV, Y_AV, 0, yaw_AV[iterate_waypoints], dt[iterate_waypoints])
+                V_AV = 0
+                cs_steer = 0
+
+                # update other vehicle position
+                X_oth, Y_oth, V_oth = update_other_vehicle_position(X_AV, X_oth, Y_AV, Y_oth, V_AV, V_oth, params.t_step_Sim)
+
+            elif Action_AV == 2: #return to lane before
+                tracking_flag = False #go track the new waypoints
+                num_return = len(return_sig[0])
+                iterate_waypoints = 0
+                sig_x = return_sig[0]
+                sig_y = return_sig[1]
+                yaw_AV = []
+
+        else :   #last waypoint from the waypoints
+            iteration = iterate_waypoints
+            veh_state = veh_state_update(yaw_AV, V_AV, iterate_waypoints)
+            Action_AV, return_flag, other_L0, other_L1, return_sig, traj_return = env_sim._calculate_game_theory_action_V0(veh_state, sig_x, sig_y, iteration, traj_tracking)
+            time_now = time.time() - time_base                
+            
+            if Action_AV == 0:  #maintain
+                # update AV position
+                # X_AV, Y_AV, V_AV, yaw_pub = update_AV_position(X_AV, Y_AV, V_ref_tr[iterate_waypoints], yaw_AV[iterate_waypoints], dt[iterate_waypoints])
+                # Calculate Stanley Lateral Control
+                V_AV, cs_steer = calculate_stanley_control(X_AV, Y_AV, yaw_pub, time_now, sig_x, sig_y, dt, V_ref_tr, yaw_AV)
+
+                # update other vehicle position
+                X_oth, Y_oth, V_oth = update_other_vehicle_position(X_AV, X_oth, Y_AV, Y_oth, V_AV, V_oth, params.t_step_Sim)
+                
+                if time_now >= dt[iterate_waypoints]: 
+                    tracking_flag = False #enable flag to search new optimal trajectory planning
+                    iterate_waypoints = 0
+                else: 
+                    pass                    
+
+            elif Action_AV == 1: #decelerate
+                # update AV position
+                # X_AV, Y_AV, V_AV, yaw_pub = update_AV_position(X_AV, Y_AV, 0, yaw_AV[iterate_waypoints], dt[iterate_waypoints])
+                V_AV = 0
+                cs_steer = 0
+
+                # update other vehicle position
+                X_oth, Y_oth, V_oth = update_other_vehicle_position(X_AV, X_oth, Y_AV, Y_oth, V_AV, V_oth, params.t_step_Sim)
+                                
+            elif Action_AV == 2: #return to lane before
+                tracking_flag = False #go track the new waypoints
+                num_return = len(return_sig[0])
+                yaw_AV = []
+                iterate_waypoints = 0
+                sig_x = return_sig[0]
+                sig_y = return_sig[1]
+
+            params.lane_bef = Y_AV
+
+    elif return_flag and not tracking_flag: 
+        # routine when give return to lane trajectory
+        if iterate_return < num_return - 2: 
+            # update AV position
+            # X_AV, Y_AV, V_AV, yaw_pub = update_AV_position(X_AV, Y_AV, traj_return[1][iterate_return], traj_return[2][iterate_return], traj_return[0][iterate_return])
+            # X_AV, Y_AV, V_ref_tr[iterate_waypoints], yaw_AV[iterate_waypoints], dt[iterate_waypoints]
+            # traj return = [dt, V_curv, yaw]
+
+            time_now = time.time() - time_base                
+            # Calculate Stanley Lateral Control
+            V_AV, cs_steer = calculate_stanley_control(X_AV, Y_AV, yaw_pub, time_now, sig_x, sig_y, traj_return[0], traj_return[1], traj_return[2])
+
+            # update other vehicle position
+            # calculate relative time
+            time_other = (traj_return[0][iterate_return]*traj_return[1][iterate_return])/V_oth
+            X_oth, Y_oth, V_oth = update_other_vehicle_position(X_AV, X_oth, Y_AV, Y_oth, V_AV, V_oth, params.t_step_Sim)
+
+            iterate_return += 1
+
+        else: #last return to lane trajectory waypoints
+            # update AV position
+            # X_AV, Y_AV, V_AV, yaw_pub = update_AV_position(X_AV, Y_AV, traj_return[1][iterate_return], traj_return[2][iterate_return], traj_return[0][iterate_return])
+            # yaw_AV = [traj_return[2][iterate_return]]
+            time_now = time.time() - time_base                
+            # Calculate Stanley Lateral Control
+            V_AV, cs_steer = calculate_stanley_control(X_AV, Y_AV, yaw_pub, time_now, sig_x, sig_y, traj_return[0], traj_return[1], traj_return[2])
+
+            # update other vehicle position
+            # calculate relative time
+            time_other = (traj_return[0][iterate_return]*traj_return[1][iterate_return])/V_oth
+            X_oth, Y_oth, V_oth = update_other_vehicle_position(X_AV, X_oth, Y_AV, Y_oth, V_AV, V_oth, params.t_step_Sim)
+            
+            iterate_return = 0
+            return_flag = False
+            
+    elif not tracking_flag and not return_flag: 
+        # generate optimal path 
+        V_AV = params.v_nominal
+        yaw_AV = [yaw_pub]
+        initial_state = veh_state_update(yaw_AV, V_AV, iterate_waypoints) 
+        x_tr, y_tr, sig_x, sig_y, tracking_flag, V_ref_tr, dt, yaw_AV = path_generation._path_generation(initial_state)
+        params.lane_bef = Y_AV
+        # update base time
+        time_base = time.time()
+
+        num_waypoints = len(sig_x)
+        traj_tracking = [V_ref_tr, dt, yaw_AV]
+        yaw_pub = yaw_AV[iterate_waypoints]
+
+        if not tracking_flag: #to acomodate maintain and deccelerate action
+            # update AV position
+            # X_AV, Y_AV, V_AV, yaw_pub = update_AV_position(X_AV, Y_AV, V_ref_tr[iterate_waypoints], yaw_AV[iterate_waypoints], dt[iterate_waypoints])
+            time_now = time.time() - time_base
+
+            # Calculate Stanley Lateral Control
+            V_AV, cs_steer = calculate_stanley_control(X_AV, Y_AV, yaw_pub, time_now, sig_x, sig_y, dt, V_ref_tr, yaw_AV)
+
+            # client.publish("/EV3_movement/steer_command_rad",V_AV)
+            # client.publish("/EV3_movement/speed_command",V_AV)
+            # print("command_speed :"+str(V_AV) + "command steer :"+str(cs_lat))
+
+            # update other vehicle position
+            X_oth, Y_oth, V_oth = update_other_vehicle_position(X_AV, X_oth, Y_AV, Y_oth, V_AV, V_oth, 0.1)
+
+
+    # print("AV")
+    # print(X_AV, Y_AV, V_AV, yaw_pub)
+    # print(dt)
+    client.publish("/EV3_movement/steer_command_rad",cs_steer)
+    client.publish("/EV3_movement/speed_command",V_AV)
+    # print("command_speed :"+str(V_AV) + "command steer :"+str(cs_steer)) 
+    print(cs_steer, time_now, dt[-1])       
+
+    # Store calculated value to pub_msg   
+    pub_msg.action_steer = cs_steer
+    pub_msg.action_throttle = V_AV                                                     
+    pub_msg.actual_x = X_AV
+    pub_msg.actual_y = Y_AV
+    pub_msg.target_x = float(x_tr) #x target
+    pub_msg.target_y = float(y_tr) #y target
+    pub_msg.potential_x = sig_x #x trajectory
+    pub_msg.potential_y = sig_y #y trajectory
+    pub_msg.actual_yaw = sig_x[iterate_waypoints] #x sub sigmoid
+    pub_msg.actual_speed = sig_y[iterate_waypoints] #y sub sigmoid
+    pub_msg.target_brake = float(yaw_pub)
+    pub_msg.error_lateral = X_oth
+    pub_msg.error_yaw = Y_oth
+    pub_msg.error_speed = yaw_oth
+    pub_msg.header.stamp = rospy.Time.now()
+    pub_msg.header.seq += 1
+    pub.publish(pub_msg)
+
+    # rate.sleep()
+
+print("Simulation Done!")
+# rate.sleep()
